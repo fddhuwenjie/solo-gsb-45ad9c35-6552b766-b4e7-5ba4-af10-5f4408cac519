@@ -193,6 +193,11 @@ curl -s -X DELETE http://localhost:8000/redirects \
 - 相对链接（`docs/a.html`、`../x.html`）、纯片段（`#x`）、纯查询（`?x`）、
   外部链接（`http(s)://`、`//host`、`mailto:` 等）与非链接 HTML
   （正文、注释、其他标签及属性）一律原样返回；
+- 改写按 HTML 属性语法定位**真正的 href 属性**（带引号的属性值整体跳过）：
+  其他属性值里形似 `href=` 的文本（如
+  `<a title="hint href='/docs/bait.html'" href="/docs/guide.html">` 的 title）
+  不会被误改，`data-href` 等同名后缀属性也不命中——只有真正的 href 被改写，
+  浏览器点击才不会落到 `/site` 挂载之外而 404（复现示例见下节）；
 - 改写只作用于本次响应：数据库正文、`GET /pages` 与历史修订快照
   （`GET /pages?revision=N`）始终返回发布原文；
 - 搬迁后链接仍到达新页面：存储正文中的 href 已随搬迁改指新路径，
@@ -221,6 +226,71 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 curl -s http://localhost:8000/pages
 # {"revision":1,"pages":{"/docs/guide.html":"<h2 id=\"intro\">Guide</h2>",
 #  "/index.html":"<a href=\"/docs/guide.html?lang=zh#intro\">指南</a>"}}
+```
+
+### 复现：锚点属性值里的伪 `href=` 不会被误改
+
+`<a>` 标签其他属性的值里可能出现形似 `href=` 的文本，例如
+`<a title="hint href='/docs/bait.html'" href="/docs/guide.html?lang=zh#intro">`。
+`/site` 输出与 `/relocate` 重指都只认**真正的 href 属性**：title 里的伪
+`href=` 原样保留，真正的 href 被改写/重指，点击不再 404。服务启动后逐条运行：
+
+```bash
+# 1) 发布带 id="intro" 的目标页，以及 title 内含伪 href= 的首页
+cat > /tmp/publish.json <<'JSON'
+{
+  "expected_revision": 0,
+  "changes": [
+    {"op":"upsert","path":"/docs/guide.html",
+     "content":"<h2 id=\"intro\">Guide</h2>"},
+    {"op":"upsert","path":"/index.html",
+     "content":"<a title=\"hint href='/docs/bait.html'\" href=\"/docs/guide.html?lang=zh#intro\">指南</a>"}
+  ]
+}
+JSON
+curl -s -X POST http://localhost:8000/publish \
+  -H 'Content-Type: application/json' -d @/tmp/publish.json
+# {"revision":1,"published":true}
+
+# 2) /site 输出：真正的 href 指向 /site 下（查询串与片段保留），title 原样
+curl -s http://localhost:8000/site/index.html
+# <a title="hint href='/docs/bait.html'" href="/site/docs/guide.html?lang=zh#intro">指南</a>
+
+# 3) 浏览器实际请求的地址（查询串原样携带）直接打开目标页
+curl -s -o /dev/null -w '%{http_code}\n' \
+  "http://localhost:8000/site/docs/guide.html?lang=zh"          # 200
+
+# 4) /pages 正文是发布原文（真 href 不带 /site 前缀，title 未动）
+curl -s http://localhost:8000/pages
+# {"revision":1,"pages":{"/docs/guide.html":"<h2 id=\"intro\">Guide</h2>",
+#  "/index.html":"<a title=\"hint href='/docs/bait.html'\" href=\"/docs/guide.html?lang=zh#intro\">指南</a>"}}
+
+# 5) 搬迁目标页：/relocate 只重指真正的 href，查询串与 #片段 保留
+curl -s -X POST http://localhost:8000/relocate \
+  -H 'Content-Type: application/json' \
+  -d '{"expected_revision":1,"old_path":"/docs/guide.html","new_path":"/manual/guide.html"}'
+# {"revision":2,"relocated":true,"old_path":"/docs/guide.html","new_path":"/manual/guide.html"}
+
+# 6) 首页存储正文：真 href 已指新页，title 伪 href= 未动；/site 输出再加前缀
+curl -s http://localhost:8000/pages
+# ..."/index.html":"<a title=\"hint href='/docs/bait.html'\" href=\"/manual/guide.html?lang=zh#intro\">指南</a>"...
+curl -s http://localhost:8000/site/index.html
+# <a title="hint href='/docs/bait.html'" href="/site/manual/guide.html?lang=zh#intro">指南</a>
+
+# 7) 首页链接到达新页；旧址一次 308 直达新页
+curl -s -o /dev/null -w '%{http_code}\n' \
+  "http://localhost:8000/site/manual/guide.html?lang=zh"        # 200
+curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' \
+  http://localhost:8000/site/docs/guide.html
+# 308 http://localhost:8000/site/manual/guide.html
+
+# 8) 整包校验失败（如新路径被占用）-> 422，页面、跳转和修订号均不变
+curl -s -X POST http://localhost:8000/relocate \
+  -H 'Content-Type: application/json' \
+  -d '{"expected_revision":2,"old_path":"/manual/guide.html","new_path":"/index.html"}'
+# {"detail":"validation failed","errors":[{"source":"","target":"/index.html",
+#   "reason":"new path already exists"}]}
+curl -s http://localhost:8000/revision   # {"revision":2}
 ```
 
 ## 并行变更合入（`POST /merge`）
@@ -348,7 +418,7 @@ curl -s "http://localhost:8000/pages?revision=1"
 app/
   db.py          # SQLite 连接、建表（meta/pages/redirects）、修订号元数据
   linkcheck.py   # href 解析（相对/绝对/#片段/查询串/越界）与整批链接校验
-  htmlrewrite.py # 字节级 <a href> 改写：只动 href 值，其余字节原样保留（relocate 与 /site 输出共用）
+  htmlrewrite.py # 字节级 <a href> 改写：按 HTML 属性语法定位真正的 href 属性，只动其值（其他属性值里的伪 href= 不受影响），其余字节原样保留（relocate 与 /site 输出共用）
   publish.py     # 单写事务：试用整批改动 -> 跳转守护 + 校验 -> 提交；冲突/校验错误（/merge 复用其试用与入口页校验）
   merge.py       # 单写事务：基线-当前路径比对 -> 并行合入 -> 跳转守护 + 整包校验 -> 新修订
   relocate.py    # 单写事务：页面搬迁、站内 href 改写（沿用 linkcheck/htmlrewrite）、旧地址跳转联动、整包校验、新修订

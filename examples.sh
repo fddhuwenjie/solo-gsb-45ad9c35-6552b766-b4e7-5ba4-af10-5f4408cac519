@@ -153,6 +153,26 @@ site_status /docs/index.html
 echo "== 24) /pages 与历史快照仍是发布原文（不带 /site 前缀）"
 curl -sS "$BASE/pages?revision=9"; echo
 
+echo "== 25) 锚点 title 内含伪 href= 文本：发布目标页（id=intro）与首页（预期 200，revision=10）"
+post_publish "$(cat <<'JSON'
+{"expected_revision":9,"changes":[
+  {"op":"upsert","path":"/index.html","content":"<h1 id=\"top\">首页</h1> <a title=\"hint href='/docs/bait.html'\" href=\"/docs/guide.html?lang=zh#intro\">指南</a>"},
+  {"op":"upsert","path":"/docs/guide.html","content":"<h2 id=\"intro\">Guide</h2>"}
+]}
+JSON
+)"
+
+echo "== 26) /site 输出：只有真正的 href 加 /site 前缀，title 里的伪 href= 原样；点击即可打开"
+curl -sS "$BASE/site/index.html"; echo
+curl -sS -o /dev/null -w "  /site/docs/guide.html?lang=zh -> HTTP %{http_code}\n" \
+  "$BASE/site/docs/guide.html?lang=zh"
+
+echo "== 27) 搬迁目标页 /docs/guide.html -> /manual/guide.html（预期 200，revision=11）：只重指真正的 href，旧址 308 直达新页"
+post_relocate '{"expected_revision":10,"old_path":"/docs/guide.html","new_path":"/manual/guide.html"}'
+curl -sS "$BASE/site/index.html"; echo
+site_status /docs/guide.html
+site_status /manual/guide.html
+
 echo "== 当前修订号与最终页面集合"
 curl -sS "$BASE/revision"; echo
 curl -sS "$BASE/pages"; echo
