@@ -68,7 +68,9 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000   # 首次启动自动建表
 
 - 旧路径消失，新页面**保留原有正文与元素 `id`**；
 - 其他页面中解析后指向旧页的站内 `href` 改指新页（绝对 `href` 用绝对新路径，
-  相对 `href` 用相对新路径），查询参数与 `#片段` 原样保留；
+  相对 `href` 用相对新路径），查询参数与 `#片段` 原样保留；只改锚点**真正的
+  href 属性**，其他属性值里的伪 `href=`（如 `title="hint href='/x'"`）、
+  `data-href` 等一律不动；
 - 搬迁页**自身的相对 `href`** 以新位置为基准重定位，使各链接原本指向的页面与片段
   在搬迁后仍可到达；纯片段（`#x`）/纯查询（`?x`）指向本页，无需改写；
 - 外部链接与非链接内容（正文文本、注释、其他标签及属性等）一律不改；
@@ -193,34 +195,52 @@ curl -s -X DELETE http://localhost:8000/redirects \
 - 相对链接（`docs/a.html`、`../x.html`）、纯片段（`#x`）、纯查询（`?x`）、
   外部链接（`http(s)://`、`//host`、`mailto:` 等）与非链接 HTML
   （正文、注释、其他标签及属性）一律原样返回；
+- **只有锚点真正的 `href` 属性会被改写**：其他属性值里出现的 `href=` 文本
+  （例如 `<a title="hint href='/docs/bait.html'" href="/docs/guide.html">`）
+  不会被误认成链接，`title` 原样保留，只给真正的 href 加前缀；
+  `data-href` 等属性同样不动；
 - 改写只作用于本次响应：数据库正文、`GET /pages` 与历史修订快照
   （`GET /pages?revision=N`）始终返回发布原文；
 - 搬迁后链接仍到达新页面：存储正文中的 href 已随搬迁改指新路径，
   `/site` 输出时再加前缀；旧址保持一次 `308` 直达 `/site` 下的真实页。
 
 ```bash
-# 发布首页（含带查询串与片段的绝对站内链接）与真实目标页
+# 发布：目标页带 id="intro"；首页的 title 属性里放了一个伪 href=，
+# 真正的 href 指向目标页（带查询串与片段）
 curl -s -X POST http://localhost:8000/publish \
   -H 'Content-Type: application/json' \
   -d '{"expected_revision":0,"changes":[
         {"op":"upsert","path":"/index.html",
-         "content":"<a href=\"/docs/guide.html?lang=zh#intro\">指南</a>"},
+         "content":"<a title=\"hint href=&#39;/docs/bait.html&#39;\" href=\"/docs/guide.html?lang=zh#intro\">指南</a>"},
         {"op":"upsert","path":"/docs/guide.html",
          "content":"<h2 id=\"intro\">Guide</h2>"}]}'
 # {"revision":1,"published":true}
 
-# /site 返回的 HTML 中，绝对站内 href 指向 /site 下（查询串与片段保留）
+# /site 输出：只有真正的 href 被加 /site 前缀；title 里的伪 href= 原样保留
 curl -s http://localhost:8000/site/index.html
-# <a href="/site/docs/guide.html?lang=zh#intro">指南</a>
+# <a title="hint href='/docs/bait.html'" href="/site/docs/guide.html?lang=zh#intro">指南</a>
 
-# 浏览器实际请求的地址（查询串原样携带）直接打开目标页
-curl -s -o /dev/null -w '%{http_code}\n' \
-  "http://localhost:8000/site/docs/guide.html?lang=zh"          # 200
+# 浏览器点击真正的链接（查询串原样携带、片段由浏览器定位 id="intro"）直达 200
+curl -s -o /dev/null -w '%{http_code}\n' "http://localhost:8000/site/docs/guide.html?lang=zh"
+# 200
+# title 里的伪地址不是真实页面，也从未被写进 href
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8000/site/docs/bait.html
+# 404
 
-# /pages 与历史快照仍是发布原文（不带 /site 前缀）
+# 搬迁目标页：只重指真正的 href（保留查询串/片段），首页到达新页，旧址一次 308
+curl -s -X POST http://localhost:8000/relocate \
+  -H 'Content-Type: application/json' \
+  -d '{"expected_revision":1,"old_path":"/docs/guide.html","new_path":"/manual/guide.html"}'
+# {"revision":2,"relocated":true,...}
+curl -s http://localhost:8000/site/index.html
+# <a title="hint href='/docs/bait.html'" href="/site/manual/guide.html?lang=zh#intro">指南</a>
+curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' \
+  http://localhost:8000/site/docs/guide.html
+# 308 http://localhost:8000/site/manual/guide.html
+
+# /pages 与历史快照仍是发布原文（不带 /site 前缀，title 也从未被改）
 curl -s http://localhost:8000/pages
-# {"revision":1,"pages":{"/docs/guide.html":"<h2 id=\"intro\">Guide</h2>",
-#  "/index.html":"<a href=\"/docs/guide.html?lang=zh#intro\">指南</a>"}}
+# {"revision":2,"pages":{"/index.html":"<a title=\"hint href='/docs/bait.html'\" href=\"/manual/guide.html?lang=zh#intro\">指南</a>", ...}}
 ```
 
 ## 并行变更合入（`POST /merge`）

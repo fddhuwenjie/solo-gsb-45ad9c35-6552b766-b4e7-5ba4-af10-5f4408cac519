@@ -157,3 +157,28 @@ echo "== 当前修订号与最终页面集合"
 curl -sS "$BASE/revision"; echo
 curl -sS "$BASE/pages"; echo
 
+echo "== 25) 回归：锚点其他属性值里的伪 href= 不得被误改"
+# 续接上文 revision 9：新增一组独立页面，首页的 title 属性里放伪 href=，
+# 真正的 href 指向带 id="intro" 的目标页（带查询串与片段）
+post_publish '{"expected_revision":9,"changes":[
+  {"op":"upsert","path":"/bait.html","content":"<a title=\"hint href=&#39;/docs/bait.html&#39;\" href=\"/docs/walkthrough.html?lang=zh#intro\">进入</a>"},
+  {"op":"upsert","path":"/docs/walkthrough.html","content":"<h2 id=\"intro\">Walkthrough</h2> <a href=\"/bait.html\">back</a>"}
+]}'
+
+echo "-- /site 只给真正的 href 加前缀，title 里的伪 href= 原样保留"
+curl -sS "$BASE/site/bait.html"; echo
+
+echo "-- 点击真正的链接（查询串原样携带）直达 200；title 里的伪地址是 404"
+site_status "/docs/walkthrough.html?lang=zh"
+site_status /docs/bait.html
+
+echo "-- 搬迁目标页：只重指真正的 href（查询串/片段保留），首页到达新页，旧址一次 308"
+post_relocate '{"expected_revision":10,"old_path":"/docs/walkthrough.html","new_path":"/guide/walkthrough.html"}'
+curl -sS "$BASE/site/bait.html"; echo
+site_status /docs/walkthrough.html
+curl -sS "$BASE/redirects"; echo
+
+echo "-- /pages 存储正文：真正的 href 已改指新页，title 从未被动过；历史快照仍为发布原文"
+curl -sS "$BASE/pages" | tr ',' '\n' | grep -A0 'bait.html'
+curl -sS "$BASE/pages?revision=10" | tr ',' '\n' | grep 'walkthrough'
+

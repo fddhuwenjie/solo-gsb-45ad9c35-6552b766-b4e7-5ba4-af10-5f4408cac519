@@ -69,6 +69,61 @@ def test_rewrite_only_touches_anchor_href():
     assert "<span>正文 old.html 不改</span>" in out
 
 
+def test_rewrite_ignores_fake_href_inside_other_attribute():
+    """回归：title 等其他属性值里的伪 href= 不得被搬迁误改。
+
+    历史缺陷：``title="hint href='/docs/bait.html'"`` 中的伪 href 被正则
+    误认成真正的 href 属性而改写到 title，真正指向旧页的 href 反而留下，
+    导致搬迁后首页链接仍指向已不存在的旧页（点击 404），整包校验也会失败。
+    """
+    html = (
+        "<a title=\"hint href='/docs/bait.html'\" "
+        'href="/docs/guide.html?lang=zh#intro">指南</a>'
+    )
+    out = rewrite_anchor_hrefs(
+        html,
+        lambda h: _repoint_other_page_href(
+            "/index.html", "/docs/guide.html", "/manual/guide.html", h
+        ),
+    )
+    assert out == (
+        "<a title=\"hint href='/docs/bait.html'\" "
+        'href="/manual/guide.html?lang=zh#intro">指南</a>'
+    )
+
+    # 反向引号嵌套同样只动真 href
+    html = (
+        "<a title='hint href=\"/docs/bait.html\"' "
+        "href='/docs/guide.html?lang=zh#intro'>指南</a>"
+    )
+    out = rewrite_anchor_hrefs(
+        html,
+        lambda h: _repoint_other_page_href(
+            "/index.html", "/docs/guide.html", "/manual/guide.html", h
+        ),
+    )
+    assert out == (
+        "<a title='hint href=\"/docs/bait.html\"' "
+        "href='/manual/guide.html?lang=zh#intro'>指南</a>"
+    )
+
+    # 真 href 指向前，data-href 与 title 里的伪 href= 都保持原样
+    html = (
+        '<a data-href="/docs/bait.html" '
+        "title=\"hint href='/docs/bait.html'\" "
+        'href="/docs/guide.html">x</a>'
+    )
+    out = rewrite_anchor_hrefs(
+        html,
+        lambda h: _repoint_other_page_href(
+            "/index.html", "/docs/guide.html", "/manual/guide.html", h
+        ),
+    )
+    assert 'data-href="/docs/bait.html"' in out
+    assert "title=\"hint href='/docs/bait.html'\"" in out
+    assert 'href="/manual/guide.html"' in out
+
+
 def test_other_page_absolute_and_relative_repoint():
     # 绝对 href 改绝对新路径；相对 href 改相对新路径，查询串/片段保留
     assert _repoint_other_page_href("/index.html", "/docs/a.html", "/info/a.html",
